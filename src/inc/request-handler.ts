@@ -6,6 +6,8 @@ export class RequestHandler {
   public scheme: TokenableScheme | RefreshableScheme
   public axios: NuxtAxiosInstance
   public interceptor: number
+  public isRefreshing = false;
+  public failedQueue = [];
 
   constructor(
     scheme: TokenableScheme | RefreshableScheme,
@@ -15,6 +17,18 @@ export class RequestHandler {
     this.axios = axios
     this.interceptor = null
   }
+
+  processQueue = (error, token = null) => {
+    this.failedQueue.forEach(prom => {
+        if (error) {
+            prom.reject(error);
+        } else {
+            prom.resolve(token);
+        }
+    });
+
+    this.failedQueue = [];
+  };
 
   setHeader(token: string): void {
     if (this.scheme.options.token.global) {
@@ -29,12 +43,12 @@ export class RequestHandler {
       this.axios.setHeader(this.scheme.options.token.name, false)
     }
   }
-
+  
   // ---------------------------------------------------------------
   initializeRequestInterceptor(refreshEndpoint?: string): void {
     this.interceptor = this.axios.interceptors.request.use(async (config) => {
       // Don't intercept refresh token requests
-      if (!this._needToken(config) || config.url === refreshEndpoint) {
+      if (!this.isRefreshing && !this._needToken(config) || config.url === refreshEndpoint) {
         return config
       }
 
@@ -62,14 +76,32 @@ export class RequestHandler {
         }
 
         // Refresh token is available. Attempt refresh.
-        isValid = await (this.scheme as RefreshableScheme)
+        var _this = this;
+        if (this.isRefreshing) {
+          return new Promise(function() {
+            _this.failedQueue.push(config);
+          })
+          
+        }
+        else {
+          this.isRefreshing = true;
+          isValid = await (this.scheme as RefreshableScheme)
           .refreshTokens()
+          .then(() => {
+            this.isRefreshing = false;
+            _this.failedQueue.forEach(element => {
+              console.log("element",element);
+              this.axios(element);
+            });
+            this.failedQueue = [];
+          })
           .then(() => true)
           .catch(() => {
             // Tokens couldn't be refreshed. Force reset.
             this.scheme.reset()
             throw new ExpiredAuthSessionError()
           })
+        }
       }
 
       // Sync token
@@ -90,7 +122,10 @@ export class RequestHandler {
       // Fetch updated token and add to current request
       return this._getUpdatedRequestConfig(config, token)
     })
+
+    
   }
+  
 
   reset(): void {
     // Eject request interceptor
